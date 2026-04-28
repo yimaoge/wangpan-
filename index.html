@@ -89,7 +89,7 @@
                 <div class="border-dashed border-2 border-gray-300 rounded-xl p-6 text-center bg-gray-50">
                     <input type="file" id="fileInput" multiple class="hidden">
                     <button onclick="document.getElementById('fileInput').click()" class="bg-primary text-white px-6 py-3 rounded-lg font-medium btn-hover"><i class="fa-solid fa-upload mr-2"></i>选择文件上传</button>
-                    <p class="text-gray-500 mt-3 text-sm">支持任意格式文件，上传大小无限制</p>
+                    <p class="text-gray-500 mt-3 text-sm">支持任意格式文件，上传后内网穿透可正常下载</p>
                 </div>
             </div>
 
@@ -110,7 +110,6 @@
     </div>
 
     <script>
-        const LOCAL_STORAGE_PATH = "D:\\MyFileServer";
         const ADMIN_USER = "huashao";
         const ADMIN_PWD = "hs848266888";
 
@@ -125,11 +124,13 @@
 
         function initDB() {
             return new Promise((resolve) => {
-                const request = indexedDB.open("FileStorageSystem", 1);
+                const request = indexedDB.open("FileStorageSystem", 2);
                 request.onupgradeneeded = e => {
                     const db = e.target.result;
                     if (!db.objectStoreNames.contains("users")) db.createObjectStore("users", {keyPath: "username"});
-                    if (!db.objectStoreNames.contains("files")) db.createObjectStore("files", {keyPath: "id", autoIncrement: true});
+                    if (!db.objectStoreNames.contains("files")) {
+                        const store = db.createObjectStore("files", {keyPath: "id", autoIncrement: true});
+                    }
                 };
                 request.onsuccess = e => {
                     fileDatabase = e.target.result;
@@ -234,83 +235,97 @@
             loginPwd.value = "";
         }
 
+        // 上传文件（保存二进制数据到IndexedDB）
         fileInput.onchange = async e => {
             const files = e.target.files;
             if (!files.length) return;
+            
             for (let file of files) {
+                // 读取文件为Blob
+                const blob = file.slice();
                 const fileData = {
                     name: file.name,
                     size: formatFileSize(file.size),
                     uploadTime: new Date().toLocaleString(),
-                    localPath: `${LOCAL_STORAGE_PATH}\\${file.name}`
+                    fileBlob: blob // 保存文件二进制数据
                 };
-                await new Promise(r => {
-                    fileDatabase.transaction("files", "readwrite").objectStore("files").add(fileData).onsuccess = r;
+                
+                await new Promise(resolve => {
+                    const tx = fileDatabase.transaction("files", "readwrite");
+                    tx.objectStore("files").add(fileData).onsuccess = resolve;
                 });
-                await saveFileToLocal(file);
             }
-            alert("上传完成！");
+            
+            alert("上传完成！内网穿透可正常下载");
             loadFileList();
             fileInput.value = "";
         };
 
-        async function saveFileToLocal(file) {
-            const handle = await window.showDirectoryPicker({ startIn: "documents", mode: "readwrite" });
-            const fileHandle = await handle.getFileHandle(file.name, { create: true });
-            const writable = await fileHandle.createWritable();
-            await writable.write(file);
-            await writable.close();
-        }
-
+        // 加载文件列表
         function loadFileList() {
             fileList.querySelectorAll(".file-item").forEach(i => i.remove());
+            
             fileDatabase.transaction("files").objectStore("files").openCursor().onsuccess = e => {
-                const c = e.target.result;
-                if (c) {
-                    const f = c.value;
+                const cursor = e.target.result;
+                if (cursor) {
+                    const file = cursor.value;
                     const div = document.createElement("div");
                     div.className = "py-3 file-item";
                     div.innerHTML = `
                     <div class="grid grid-cols-12 items-center">
-                        <div class="col-span-6 font-medium"><i class="fa-solid fa-file text-primary mr-2"></i>${f.name}</div>
-                        <div class="col-span-3 text-center text-sm text-gray-500">${f.size}</div>
+                        <div class="col-span-6 font-medium"><i class="fa-solid fa-file text-primary mr-2"></i>${file.name}</div>
+                        <div class="col-span-3 text-center text-sm text-gray-500">${file.size}</div>
                         <div class="col-span-3 text-center">
-                            <button onclick="downloadFile('${f.id}')" class="bg-success text-white px-3 py-1 rounded text-sm btn-hover">下载</button>
-                            ${currentUser.role === "admin" ? `<button onclick="deleteFile(${f.id})" class="bg-danger text-white px-3 py-1 rounded text-sm btn-hover ml-1">删除</button>` : ""}
+                            <button onclick="downloadFile(${file.id})" class="bg-success text-white px-3 py-1 rounded text-sm btn-hover">下载</button>
+                            ${currentUser.role === "admin" ? `<button onclick="deleteFile(${file.id})" class="bg-danger text-white px-3 py-1 rounded text-sm btn-hover ml-1">删除</button>` : ""}
                         </div>
                     </div>`;
                     fileList.appendChild(div);
-                    c.continue();
+                    cursor.continue();
                 }
             };
         }
 
+        // 下载文件（内网穿透可用）
         function downloadFile(fileId) {
             fileDatabase.transaction("files").objectStore("files").get(Number(fileId)).onsuccess = e => {
-                const f = e.target.result;
+                const file = e.target.result;
+                if (!file || !file.fileBlob) {
+                    alert("文件数据异常！");
+                    return;
+                }
+
+                // 创建下载链接
+                const url = URL.createObjectURL(file.fileBlob);
                 const a = document.createElement("a");
-                a.href = `file://${f.localPath.replace(/\\/g, "/")}`;
-                a.download = f.name;
+                a.href = url;
+                a.download = file.name;
                 a.click();
+                
+                // 释放内存
+                setTimeout(() => URL.revokeObjectURL(url), 100);
             };
         }
 
+        // 删除文件
         function deleteFile(id) {
-            if (!confirm("确定删除？")) return;
-            fileDatabase.transaction("files", "readwrite").objectStore("files").delete(id).onsuccess = () => {
+            if (!confirm("确定删除该文件？")) return;
+            
+            const tx = fileDatabase.transaction("files", "readwrite");
+            tx.objectStore("files").delete(id).onsuccess = () => {
                 loadFileList();
-                alert("删除成功！");
+                alert("文件删除成功！");
             };
         }
 
-        function formatFileSize(b) {
-            if (b === 0) return "0 B";
+        // 文件大小格式化
+        function formatFileSize(bytes) {
+            if (bytes === 0) return "0 B";
             const k = 1024;
-            const s = ["B", "KB", "MB", "GB"];
-            const i = Math.floor(Math.log(b) / Math.log(k));
-            return (b / Math.pow(k, i)).toFixed(2) + " " + s[i];
+            const sizes = ["B", "KB", "MB", "GB"];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
         }
     </script>
 </body>
 </html>
-  
